@@ -1,10 +1,10 @@
 // src/app/api/convert/route.ts
+
 import { NextRequest, NextResponse } from "next/server";
 import { marked } from "marked";
 import TurndownService from "turndown";
 import mammoth from "mammoth";
 import puppeteer from "puppeteer";
-import pdf from "pdf-parse";
 
 export async function POST(request: NextRequest) {
   try {
@@ -26,7 +26,7 @@ export async function POST(request: NextRequest) {
     switch (conversionType) {
       case "md-to-html":
         const markdown = await inputFile.text();
-        outputContent = marked(markdown);
+        outputContent = await marked(markdown);
         outputContentType = "text/html";
         break;
 
@@ -54,7 +54,8 @@ export async function POST(request: NextRequest) {
         const browser = await puppeteer.launch();
         const page = await browser.newPage();
         await page.setContent(html);
-        outputContent = await page.pdf({ format: "A4" });
+        const pdfBuffer = await page.pdf({ format: "A4" });
+        outputContent = new Uint8Array(pdfBuffer).buffer;
         await browser.close();
         outputContentType = "application/pdf";
         break;
@@ -62,27 +63,47 @@ export async function POST(request: NextRequest) {
 
       case "md-to-pdf": {
         const markdown = await inputFile.text();
-        const html = marked(markdown);
+        const html = await marked(markdown);
         const browser = await puppeteer.launch();
         const page = await browser.newPage();
         await page.setContent(html, { waitUntil: "networkidle0" });
-        outputContent = await page.pdf({ format: "A4" });
+        const pdfBuffer = await page.pdf({ format: "A4" });
+        outputContent = new Uint8Array(pdfBuffer).buffer;
         await browser.close();
         outputContentType = "application/pdf";
         break;
       }
 
       case "pdf-to-html": {
-        const data = await pdf(Buffer.from(inputBuffer));
-        // Basic HTML structure, preserving line breaks
-        outputContent = `<!DOCTYPE html><html><head><title>${inputFile.name}</title></head><body><pre>${data.text}</pre></body></html>`;
+        const PDFParser = (await import("pdf2json")).default;
+        const pdfParser = new PDFParser();
+        const textContent = await new Promise<string>((resolve, reject) => {
+          pdfParser.on("pdfParser_dataError", (errData: any) =>
+            reject(errData.parserError)
+          );
+          pdfParser.on("pdfParser_dataReady", () => {
+            resolve(pdfParser.getRawTextContent());
+          });
+          pdfParser.parseBuffer(Buffer.from(inputBuffer));
+        });
+        outputContent = `<!DOCTYPE html><html><head><title>${inputFile.name}</title></head><body><pre>${textContent}</pre></body></html>`;
         outputContentType = "text/html";
         break;
       }
 
       case "pdf-to-docx": {
-        const data = await pdf(Buffer.from(inputBuffer));
-        outputContent = data.text;
+        const PDFParser = (await import("pdf2json")).default;
+        const pdfParser = new PDFParser();
+        const textContent = await new Promise<string>((resolve, reject) => {
+          pdfParser.on("pdfParser_dataError", (errData: any) =>
+            reject(errData.parserError)
+          );
+          pdfParser.on("pdfParser_dataReady", () => {
+            resolve(pdfParser.getRawTextContent());
+          });
+          pdfParser.parseBuffer(Buffer.from(inputBuffer));
+        });
+        outputContent = textContent;
         outputContentType =
           "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
         break;
@@ -104,9 +125,10 @@ export async function POST(request: NextRequest) {
     const blob = new Blob([outputContent], { type: outputContentType });
 
     const headers = new Headers();
+    const encodedFileName = encodeURIComponent(outputFileName);
     headers.append(
       "Content-Disposition",
-      `attachment; filename="${outputFileName}"`
+      `attachment; filename*=UTF-8''${encodedFileName}`
     );
     headers.append("Content-Type", outputContentType);
 
